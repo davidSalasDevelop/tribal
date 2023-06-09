@@ -6,6 +6,8 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"sync"
+	"time"
 )
 
 type Mujeres struct {
@@ -22,54 +24,70 @@ type User struct {
 	} `json:"login"`
 }
 
-// func handleRequest(w http.ResponseWriter, r *http.Request) {
-
-// }
-
 func main() {
-
-	// Define HTTP routes and handlers
 	http.HandleFunc("/mujeres", func(w http.ResponseWriter, r *http.Request) {
-
 		switch r.Method {
 		case http.MethodPost:
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprintf(w, "Resonse Ok")
-
+			fmt.Fprintf(w, "Response Ok")
 			return
 
 		case http.MethodGet:
-			//REtrieve the las inserted location
-
 			totalResults := 25000
 			resultsPerPage := 1000
 			numRequests := totalResults / resultsPerPage
 
-			var allUsers []User
+			allUsers := make([]User, 0)
+			usersCh := make(chan []User)
+			wg := sync.WaitGroup{}
+			countMutex := sync.Mutex{}
+			resultCount := 0
 
-			for i := 0; i < numRequests; i++ {
-				url := fmt.Sprintf("https://randomuser.me/api/?results=%d", resultsPerPage)
-				response, err := http.Get(url)
-				if err != nil {
-					http.Error(w, "Error fetching data", http.StatusInternalServerError)
-					return
+			for i := 0; i < numRequests; i += 5 {
+				wg.Add(5)
+				for j := 0; j < 5; j++ {
+					go func() {
+						defer wg.Done()
+						url := fmt.Sprintf("https://randomuser.me/api/?results=%d", resultsPerPage)
+						response, err := http.Get(url)
+						if err != nil {
+							log.Printf("Error fetching data: %s", err.Error())
+							return
+						}
+						defer response.Body.Close()
+
+						body, err := ioutil.ReadAll(response.Body)
+						if err != nil {
+							log.Printf("Error reading response body: %s", err.Error())
+							return
+						}
+
+						var randomUserResp Mujeres
+						err = json.Unmarshal(body, &randomUserResp)
+						if err != nil {
+							log.Printf("Error parsing JSON response: %s", err.Error())
+							time.Sleep(10 * time.Millisecond) // Wait for 10 milliseconds before continuing
+						}
+
+						// Count the number of results
+						countMutex.Lock()
+						resultCount += len(randomUserResp.Results)
+						countMutex.Unlock()
+
+						usersCh <- randomUserResp.Results
+					}()
 				}
-				defer response.Body.Close()
 
-				body, err := ioutil.ReadAll(response.Body)
-				if err != nil {
-					http.Error(w, "Error reading response body", http.StatusInternalServerError)
-					return
-				}
+				time.Sleep(2 * time.Second) // Sleep for 2 seconds before the next set of requests
+			}
 
-				var randomUserResp Mujeres
-				err = json.Unmarshal(body, &randomUserResp)
-				if err != nil {
-					http.Error(w, "Error parsing JSON response", http.StatusInternalServerError)
-					return
-				}
+			go func() {
+				wg.Wait()
+				close(usersCh)
+			}()
 
-				allUsers = append(allUsers, randomUserResp.Results...)
+			for users := range usersCh {
+				allUsers = append(allUsers, users...)
 			}
 
 			responseData, err := json.Marshal(allUsers)
@@ -80,10 +98,11 @@ func main() {
 
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(responseData)
+
+			fmt.Printf("Total Results: %d\n", resultCount)
 		}
 	})
 
 	log.Println("Server listening on http://localhost:8000")
 	log.Fatal(http.ListenAndServe(":8000", nil))
-
 }
